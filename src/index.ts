@@ -28,11 +28,7 @@ export {
 export { dataOperations, dispatchResponseSchema, pluralizeResource, resourceOperations } from './openapi';
 export { type ResourceOptions, resourceRoutes, resourceServiceToken } from './resource-routes';
 export { createRouter, ResourceRouter } from './router';
-export {
-  type ResolvedResourceSchemas,
-  type ResourceSchemaOptions,
-  resolveResourceSchemas,
-} from './schema-resolver';
+export { type ResolvedResourceSchemas, type ResourceSchemaOptions, resolveResourceSchemas } from './schema-resolver';
 export { DEFAULT_SERVICE_CONTEXT, ownedBy, ResourceService } from './service';
 // Grouped conventions: every type in ./types, every constant in ./constants.
 export type {

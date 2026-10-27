@@ -1,21 +1,29 @@
 {
   "name": "@framework/crud",
   "version": "0.2.0",
-  "description": "Generic CRUD service, controller, audit trail endpoints, and queued CSV/JSON import-export.",
   "private": true,
-  "license": "MIT",
-  "type": "module",
+  "description": "Generic CRUD service, controller, audit trail endpoints, and queued CSV/JSON import-export.",
   "homepage": "https://github.com/mohamedhabibwork/framework-crud#readme",
+  "bugs": {
+    "url": "https://github.com/mohamedhabibwork/framework/issues"
+  },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mohamedhabibwork/framework.git",
     "directory": "packages/crud"
   },
-  "bugs": {
-    "url": "https://github.com/mohamedhabibwork/framework/issues"
-  },
+  "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "@framework/core": "workspace:*",

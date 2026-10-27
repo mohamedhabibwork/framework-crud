@@ -407,9 +407,12 @@ describe('Empirical Challenger: ResourceController & DTO Transforms Stress Harne
 
     test('3.3: zero-argument constructor instantiation behavior', () => {
       // Calling constructor with literally ZERO arguments
-      const controller = new (
-        ResourceController as unknown as new () => ResourceController<TestEntity, TestCreate, TestUpdate, TestEntity>
-      )();
+      const controller = new (ResourceController as unknown as new () => ResourceController<
+        TestEntity,
+        TestCreate,
+        TestUpdate,
+        TestEntity
+      >)();
       expect(controller).toBeInstanceOf(ResourceController);
 
       // Verify that default serialize property is initialized to identity
