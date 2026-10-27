@@ -1,0 +1,35 @@
+{
+  "name": "@framework/crud",
+  "version": "0.2.0",
+  "description": "Generic CRUD service, controller, audit trail endpoints, and queued CSV/JSON import-export.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/mohamedhabibwork/framework-crud#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mohamedhabibwork/framework.git",
+    "directory": "packages/crud"
+  },
+  "bugs": {
+    "url": "https://github.com/mohamedhabibwork/framework/issues"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@framework/core": "workspace:*",
+    "@framework/database": "workspace:*",
+    "@framework/events": "workspace:*",
+    "@framework/http": "workspace:*",
+    "@framework/openapi": "workspace:*",
+    "@framework/queue": "workspace:*",
+    "@framework/validation": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "hono": "4.13.13",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@framework/testing": "workspace:*"
+  }
+}
