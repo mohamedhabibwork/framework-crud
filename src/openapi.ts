@@ -111,6 +111,8 @@ export interface ResourceOperationsInput {
   readonly security?: 'public' | readonly string[];
   /** Override the OpenAPI tag (default: the English plural of `resource`). */
   readonly tag?: string;
+  /** Query parameters of the single-row read (e.g. `include`). */
+  readonly showQuery?: z.ZodObject;
   /** Whether to document soft-delete endpoints (/deleted, /deleted/:id, /:id/restore). */
   readonly softDelete?: boolean;
 }
@@ -195,7 +197,14 @@ export function resourceOperations(input: ResourceOperationsInput): Operation[] 
       operationId: `show${resource}`,
       summary: `Show a ${camel}`,
       security,
-      ...(schemas.param ? { request: { params: schemas.param } } : {}),
+      ...(schemas.param || input.showQuery
+        ? {
+            request: {
+              ...(schemas.param ? { params: schemas.param } : {}),
+              ...(input.showQuery ? { query: input.showQuery } : {}),
+            },
+          }
+        : {}),
       responses: { 200: { description: `The ${camel}`, schema: schemas.response } },
       errors: [404, 422],
     }),

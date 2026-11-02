@@ -65,3 +65,20 @@ export type {
   ServiceContext,
   StoredExport,
 } from './types';
+export {
+  defineListQuery,
+  type FilterableColumns,
+  type FilterOperator,
+  type ListQuery,
+  type ListQueryOptions,
+} from './list-query';
+export {
+  type BelongsToOptions,
+  belongsTo,
+  type HasManyOptions,
+  hasMany,
+  type Included,
+  type Relation,
+  type RelationScope,
+  type Relations,
+} from './relations';

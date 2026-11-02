@@ -1,3 +1,4 @@
+import { FrameworkError } from '@framework/core';
 import type { CrudTable } from '@framework/database';
 import { createInsertSchema, createSelectSchema, createUpdateSchema, paginationQuerySchema } from '@framework/database';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
@@ -18,6 +19,8 @@ export interface ResourceSchemaOptions<TCreate = unknown, TUpdate = unknown> {
   readonly softDeleteColumn?: AnyPgColumn;
   /** Columns clients may not set, beyond the system ones. Applies to derived schemas only. */
   readonly readOnly?: readonly string[];
+  /** Replaces a column's derived schema, e.g. the shape of a `jsonb` column. Optionality still follows the table. */
+  readonly columns?: Readonly<Record<string, z.ZodType>>;
 }
 
 export interface ResolvedResourceSchemas<TCreate = unknown, TUpdate = unknown> {
@@ -25,6 +28,33 @@ export interface ResolvedResourceSchemas<TCreate = unknown, TUpdate = unknown> {
   readonly updateSchema: z.ZodType<TUpdate>;
   readonly paramSchema: z.ZodObject<{ id: z.ZodTypeAny }>;
   readonly querySchema: z.ZodObject<z.ZodRawShape>;
+}
+
+type SchemaMode = 'insert' | 'update' | 'select';
+
+/** Applies the column's own nullability and optionality to a schema that replaces its derived one. */
+function columnField(column: AnyPgColumn, schema: z.ZodType, mode: SchemaMode): z.ZodType {
+  const typed = column.notNull ? schema : schema.nullable();
+  if (mode === 'select') return typed;
+  if (mode === 'update') return typed.optional();
+  return column.notNull && !column.hasDefault ? typed : typed.optional();
+}
+
+/** A derived schema with the `columns` option applied. */
+export function withColumnSchemas<TSchema>(
+  table: CrudTable,
+  schema: TSchema,
+  columns: Readonly<Record<string, z.ZodType>> | undefined,
+  mode: SchemaMode,
+): TSchema {
+  if (!columns) return schema;
+  const fields = Object.entries(columns).map(([name, field]): [string, z.ZodType] => {
+    const column = Object.hasOwn(table, name) ? (table as unknown as Record<string, AnyPgColumn>)[name] : undefined;
+    if (!column)
+      throw new FrameworkError('RESOURCE_COLUMN_UNKNOWN', `columns: "${name}" is not a column of this table`);
+    return [name, columnField(column, field, mode)];
+  });
+  return (schema as unknown as z.ZodObject<z.ZodRawShape>).extend(Object.fromEntries(fields)) as unknown as TSchema;
 }
 
 /**
@@ -74,7 +104,7 @@ export function resolveResourceSchemas<TTable extends CrudTable>(
   const createSchema: z.ZodType<unknown> =
     options?.createSchema ??
     (() => {
-      const insert = createInsertSchema(table);
+      const insert = withColumnSchemas(table, createInsertSchema(table), options?.columns, 'insert');
       const insertShape = insert.shape as Record<string, unknown>;
       const omitKeys = systemCols.filter((col) => col in insertShape);
       const omitMap: Record<string, true> = Object.fromEntries(omitKeys.map((col) => [col, true]));
@@ -86,7 +116,7 @@ export function resolveResourceSchemas<TTable extends CrudTable>(
   const updateSchema: z.ZodType<unknown> =
     options?.updateSchema ??
     (() => {
-      const update = createUpdateSchema(table);
+      const update = withColumnSchemas(table, createUpdateSchema(table), options?.columns, 'update');
       const updateShape = update.shape as Record<string, unknown>;
       const omitKeys = systemCols.filter((col) => col in updateShape);
       const omitMap: Record<string, true> = Object.fromEntries(omitKeys.map((col) => [col, true]));
