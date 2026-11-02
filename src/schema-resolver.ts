@@ -16,6 +16,8 @@ export interface ResourceSchemaOptions<TCreate = unknown, TUpdate = unknown> {
   readonly paramSchema?: z.ZodObject<{ id: z.ZodTypeAny }> | null;
   readonly querySchema?: z.ZodObject<z.ZodRawShape> | null;
   readonly softDeleteColumn?: AnyPgColumn;
+  /** Columns clients may not set, beyond the system ones. Applies to derived schemas only. */
+  readonly readOnly?: readonly string[];
 }
 
 export interface ResolvedResourceSchemas<TCreate = unknown, TUpdate = unknown> {
@@ -55,7 +57,7 @@ export function resolveResourceSchemas<TTable extends CrudTable>(
   const querySchema: z.ZodObject<z.ZodRawShape> =
     options?.querySchema ?? (paginationQuerySchema().strict() as z.ZodObject<z.ZodRawShape>);
 
-  const customCols: string[] = [];
+  const customCols: string[] = [...(options?.readOnly ?? [])];
   if (options?.softDeleteColumn) {
     const col = options.softDeleteColumn;
     const entry = Object.entries(table).find(([, value]) => value === col);

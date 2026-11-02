@@ -25,6 +25,7 @@ export {
   jobIdParamSchema,
   LocalExportStore,
 } from './import-export';
+export { type DefineResourceOptions, defineResource, type Resource, type ResourceRoutes } from './define-resource';
 export { dataOperations, dispatchResponseSchema, pluralizeResource, resourceOperations } from './openapi';
 export { type ResourceOptions, resourceRoutes, resourceServiceToken } from './resource-routes';
 export { createRouter, ResourceRouter } from './router';
