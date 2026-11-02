@@ -238,7 +238,7 @@ export function resourceRoutes<
       return baseService(table as CrudTable, dataContext, {
         bus,
         repositoryOptions: options.softDeleteColumn ? { softDeleteColumn: options.softDeleteColumn } : undefined,
-        container: scope as unknown as { has: (t: unknown) => boolean; resolve: <T>(t: unknown) => T },
+        container: scope,
       }) as unknown as ResourceService<SelectOf<TTable>, JsonObject, Partial<JsonObject>>;
     }
 

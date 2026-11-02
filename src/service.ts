@@ -24,9 +24,9 @@ export const DEFAULT_SERVICE_CONTEXT: ServiceContext = {
 };
 
 /** Row-level ownership configuration produced by {@link ownedBy}. */
-export interface OwnershipConfig {
+export interface OwnershipConfig<TField extends string = string> {
   /** Entity property carrying the owner's actor id (e.g. `userId`). */
-  readonly field: string;
+  readonly field: TField;
 }
 
 /**
@@ -34,7 +34,7 @@ export interface OwnershipConfig {
  * actor id in `field`. Every list/get/update/delete/restore/import on the
  * service is then scoped to the acting user — cross-owner access surfaces
  * as 404 (existence is never disclosed), and writes stamp the acting user
- * as the owner.
+ * as the owner. A service's options only accept a property of its entity.
  *
  * ```ts
  * class DocumentService extends ResourceService<Document, DocumentCreate> {
@@ -42,7 +42,7 @@ export interface OwnershipConfig {
  * }
  * ```
  */
-export const ownedBy = (field: string): OwnershipConfig => ({ field });
+export const ownedBy = <TField extends string>(field: TField): OwnershipConfig<TField> => ({ field });
 
 export interface ResourceServiceOptions<TEntity extends ResourceEntity> {
   /**
@@ -57,7 +57,7 @@ export interface ResourceServiceOptions<TEntity extends ResourceEntity> {
   /** Error thrown when an id has no visible row (default: 404 NOT_FOUND). */
   readonly missing?: (id: EntityId) => Error;
   /** Row-level ownership scope (see {@link ownedBy}). */
-  readonly ownership?: OwnershipConfig;
+  readonly ownership?: OwnershipConfig<keyof TEntity & string>;
 }
 
 export interface ImportSummary {

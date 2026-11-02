@@ -354,7 +354,8 @@ describe('Adversarial M1 Stress Tests', () => {
     test('unknown ownership field triggers OWNERSHIP_COLUMN_UNKNOWN FrameworkError', async () => {
       const ctx = getContext();
       const service = baseService(posts, ctx, {
-        ownership: ownedBy('nonExistentField'),
+        // The compiler refuses a wrong literal; a value from outside its reach still fails at runtime.
+        ownership: ownedBy('nonExistentField' as string as 'authorId'),
       });
 
       expect(service.listDeleted({ page: 1, limit: 10 })).rejects.toThrow(

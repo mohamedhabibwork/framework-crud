@@ -1,4 +1,4 @@
-import type { JsonObject } from '@framework/core';
+import type { JsonObject, Resolver } from '@framework/core';
 import {
   baseRepository,
   type CrudTable,
@@ -20,7 +20,22 @@ export interface BaseServiceOptions<
 > extends ResourceServiceOptions<TEntity> {
   readonly repository?: CrudRepository<TEntity, TCreate, TUpdate>;
   readonly repositoryOptions?: RepositoryOptions;
-  readonly container?: { has: (token: unknown) => boolean; resolve: <T>(token: unknown) => T };
+  /** Where to look for `EVENT_BUS`; defaults to a `container` or `scope` on the data context. */
+  readonly container?: Resolver;
+}
+
+const isResolver = (value: unknown): value is Resolver =>
+  typeof value === 'object' &&
+  value !== null &&
+  'has' in value &&
+  typeof value.has === 'function' &&
+  'resolve' in value &&
+  typeof value.resolve === 'function';
+
+/** A resolver some data contexts carry beyond the `DataContext` contract. */
+function contextResolver(context: DataContext): Resolver | undefined {
+  const { container, scope } = context as DataContext & { container?: unknown; scope?: unknown };
+  return [container, scope].find(isResolver);
 }
 
 /**
@@ -55,9 +70,9 @@ export function baseService<
   TUpdate extends Partial<TCreate> = Partial<TCreate>,
 >(
   table: TTable,
-  context: DataContext,
+  context?: undefined,
   options?: BaseServiceOptions<SelectOf<TTable>, TCreate, TUpdate>,
-): BaseService<TTable, TCreate, TUpdate>;
+): (context: DataContext) => BaseService<TTable, TCreate, TUpdate>;
 
 export function baseService<
   TTable extends CrudTable,
@@ -65,9 +80,9 @@ export function baseService<
   TUpdate extends Partial<TCreate> = Partial<TCreate>,
 >(
   table: TTable,
-  context?: undefined,
+  context: DataContext,
   options?: BaseServiceOptions<SelectOf<TTable>, TCreate, TUpdate>,
-): (context: DataContext) => BaseService<TTable, TCreate, TUpdate>;
+): BaseService<TTable, TCreate, TUpdate>;
 
 export function baseService<
   TTable extends CrudTable,
@@ -87,18 +102,8 @@ export function baseService<
         TUpdate
       >);
 
-    let bus: EventBus | undefined = options?.bus;
-    if (!bus) {
-      const container =
-        options?.container ??
-        ('container' in ctx ? (ctx as Record<string, unknown>).container : undefined) ??
-        ('scope' in ctx ? (ctx as Record<string, unknown>).scope : undefined);
-      if (container && typeof container === 'object' && 'has' in container && typeof container.has === 'function') {
-        if (container.has(EVENT_BUS)) {
-          bus = (container as unknown as { resolve: (token: unknown) => EventBus }).resolve(EVENT_BUS);
-        }
-      }
-    }
+    const resolver = options?.bus ? undefined : (options?.container ?? contextResolver(ctx));
+    const bus: EventBus | undefined = resolver?.has(EVENT_BUS) ? resolver.resolve(EVENT_BUS) : options?.bus;
 
     const channel = options?.channel ?? getTableName(table);
     const serialize = options?.serialize ?? ((entity: SelectOf<TTable>) => toJsonRow(entity as object));
