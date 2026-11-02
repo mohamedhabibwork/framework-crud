@@ -84,7 +84,7 @@ export function dataOperations(input: DataOperationsInput): Operation[] {
       summary: 'Download the finished export artifact',
       security,
       request: { params: jobIdParamSchema },
-      responses: { 200: { description: 'The artifact (text/csv or application/json attachment)' } },
+      responses: { 200: { description: 'The artifact as an attachment (CSV, JSON, XLSX or PDF)' } },
       errors: [400, 404, 422],
     }),
   ]);

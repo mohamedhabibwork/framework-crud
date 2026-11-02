@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type ExecutionContext, FrameworkError, type JsonObject, type JsonValue, type Token } from '@framework/core';
 import { createDomainEvent, EVENT_BUS } from '@framework/events';
@@ -9,6 +9,7 @@ import {
   type MountAuthorization,
   notFound,
   serviceUnavailable,
+  validationFailed,
 } from '@framework/http';
 import { type DispatchOptions, defineJob, type JobContext, type JobDefinition, type JobStatus } from '@framework/queue';
 import { validate } from '@framework/validation';
@@ -16,8 +17,22 @@ import { type Context, Hono } from 'hono';
 import { z } from 'zod/v4';
 import type { CrudRepository, ExportRow, ImportRow, ResourceEntity } from './contracts';
 import { csvToObjects, parseCsv, toCsvLine } from './csv';
+import { parseXlsx, xlsxChunks } from './xlsx';
 
-export type DataFormat = 'csv' | 'json';
+export type ImportFormat = 'csv' | 'json' | 'xlsx';
+export type ExportFormat = 'csv' | 'json' | 'xlsx' | 'pdf';
+export type DataFormat = ImportFormat | ExportFormat;
+
+const IMPORT_FORMATS = ['csv', 'json', 'xlsx'] as const;
+const EXPORT_FORMATS = ['csv', 'json', 'xlsx'] as const;
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+const BINARY_ARTIFACT = /\.(xlsx|pdf)$/;
+const ARTIFACT_TYPES: Readonly<Record<string, string>> = {
+  csv: 'text/csv',
+  json: 'application/json',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pdf: 'application/pdf',
+};
 
 const RESOURCE_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 const JOB_ID = /^[A-Za-z0-9:_-]{1,128}$/;
@@ -31,7 +46,8 @@ const DEFAULT_EXPORT_BATCH = 500;
 
 export type ImportPayload = {
   readonly resource: string;
-  readonly format: DataFormat;
+  readonly format: ImportFormat;
+  /** Text for `csv` and `json`, base64 for `xlsx`. */
   readonly content: string;
 };
 
@@ -74,14 +90,19 @@ function parseImportContent(payload: ImportPayload, columns?: readonly string[])
       throw new FrameworkError('IMPORT_INVALID', 'Import JSON must be an array of row objects');
     return parsed.filter((row): row is JsonObject => typeof row === 'object' && row !== null && !Array.isArray(row));
   }
-  const table = parseCsv(payload.content);
+  const table = payload.format === 'xlsx' ? parseXlsx(decodeBase64(payload.content)) : parseCsv(payload.content);
   if (columns && table.columns.join(',') !== columns.join(',')) {
     throw new FrameworkError(
       'IMPORT_HEADER_MISMATCH',
-      `CSV header must be "${columns.join(',')}" but got "${table.columns.join(',')}"`,
+      `${payload.format === 'xlsx' ? 'Header' : 'CSV header'} must be "${columns.join(',')}" but got "${table.columns.join(',')}"`,
     );
   }
   return csvToObjects(table);
+}
+
+function decodeBase64(content: string): Uint8Array {
+  if (!BASE64.test(content)) throw new FrameworkError('IMPORT_INVALID', 'Import content must be base64');
+  return new Uint8Array(Buffer.from(content, 'base64'));
 }
 
 /**
@@ -100,7 +121,7 @@ export function defineImportJob<
     version: 1,
     attempts: 1,
     payload: z
-      .object({ resource: z.literal(spec.resource), format: z.enum(['csv', 'json']), content: z.string().min(1) })
+      .object({ resource: z.literal(spec.resource), format: z.enum(IMPORT_FORMATS), content: z.string().min(1) })
       .strict(),
     async handle(payload, context: JobContext): Promise<ImportOutcome> {
       const rows = parseImportContent(payload, spec.columns);
@@ -149,7 +170,7 @@ export function defineImportJob<
 
 export type ExportPayload = {
   readonly resource: string;
-  readonly format: DataFormat;
+  readonly format: ExportFormat;
 };
 
 export type ExportOutcome = {
@@ -159,12 +180,15 @@ export type ExportOutcome = {
 
 export interface StoredExport {
   readonly name: string;
-  readonly content: string;
+  /** Text for `csv` and `json`, bytes for `xlsx` and `pdf`. */
+  readonly content: string | Uint8Array;
 }
 
 /** Where finished export artifacts land; must be shared with the download endpoint. */
 export interface ExportStore {
-  write(jobId: string, name: string, content: string): Promise<void>;
+  write(jobId: string, name: string, content: string | Uint8Array): Promise<void>;
+  /** Writes while the export runs, and publishes only on success. Without it, the artifact is held in memory first. */
+  writeStream?(jobId: string, name: string, chunks: AsyncIterable<Uint8Array>): Promise<void>;
   fetch(jobId: string): Promise<StoredExport | null>;
 }
 
@@ -177,10 +201,32 @@ export class LocalExportStore implements ExportStore {
     return join(this.dir, `${jobId.replace(/[^A-Za-z0-9._-]/g, '_')}.artifact`);
   }
 
-  async write(jobId: string, name: string, content: string): Promise<void> {
+  async write(jobId: string, name: string, content: string | Uint8Array): Promise<void> {
     await mkdir(this.dir, { recursive: true });
     await Bun.write(this.#path(jobId), content);
     await Bun.write(`${this.#path(jobId)}.name`, name);
+  }
+
+  /** A failed export removes its partial file, so a download can't return half an artifact. */
+  async writeStream(jobId: string, name: string, chunks: AsyncIterable<Uint8Array>): Promise<void> {
+    await mkdir(this.dir, { recursive: true });
+    const path = this.#path(jobId);
+    // One file per call: overlapping attempts at a job must not write into each other.
+    const partial = `${path}.${crypto.randomUUID()}.partial`;
+    const sink = Bun.file(partial).writer();
+    try {
+      for await (const chunk of chunks) {
+        sink.write(chunk);
+        await sink.flush();
+      }
+      await sink.end();
+      await Bun.write(`${path}.name`, name);
+      await rename(partial, path);
+    } catch (error) {
+      await Promise.resolve(sink.end()).catch(() => undefined);
+      await rm(partial, { force: true });
+      throw error;
+    }
   }
 
   async fetch(jobId: string): Promise<StoredExport | null> {
@@ -189,7 +235,7 @@ export class LocalExportStore implements ExportStore {
     const name = await Bun.file(`${this.#path(jobId)}.name`)
       .text()
       .catch(() => `${jobId}.txt`);
-    return { name, content: await artifact.text() };
+    return { name, content: BINARY_ARTIFACT.test(name) ? await artifact.bytes() : await artifact.text() };
   }
 }
 
@@ -202,6 +248,13 @@ export interface ArtifactDisk {
   put(path: string, data: string | Uint8Array): Promise<void>;
   get(path: string): Promise<{ readonly content: Uint8Array }>;
   exists(path: string): Promise<boolean>;
+}
+
+/** One artifact as a disk holds it: binary content travels as base64 inside the JSON object. */
+interface StoredDiskExport {
+  readonly name: string;
+  readonly content: string;
+  readonly encoding?: 'base64';
 }
 
 /** Object name inside the disk for one export artifact (metadata rides in-object). */
@@ -219,8 +272,12 @@ const artifactPath = (jobId: string): string => {
 export class DiskExportStore implements ExportStore {
   constructor(private readonly disk: ArtifactDisk) {}
 
-  async write(jobId: string, name: string, content: string): Promise<void> {
-    await this.disk.put(artifactPath(jobId), JSON.stringify({ name, content } satisfies StoredExport));
+  async write(jobId: string, name: string, content: string | Uint8Array): Promise<void> {
+    const stored: StoredDiskExport =
+      typeof content === 'string'
+        ? { name, content }
+        : { name, content: Buffer.from(content).toString('base64'), encoding: 'base64' };
+    await this.disk.put(artifactPath(jobId), JSON.stringify(stored));
   }
 
   async fetch(jobId: string): Promise<StoredExport | null> {
@@ -236,12 +293,13 @@ export class DiskExportStore implements ExportStore {
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
-      typeof (parsed as StoredExport).name !== 'string' ||
-      typeof (parsed as StoredExport).content !== 'string'
+      typeof (parsed as StoredDiskExport).name !== 'string' ||
+      typeof (parsed as StoredDiskExport).content !== 'string'
     ) {
       throw new FrameworkError('EXPORT_ARTIFACT_INVALID', `Export artifact ${jobId} is malformed`);
     }
-    return parsed as StoredExport;
+    const { name, content, encoding } = parsed as StoredDiskExport;
+    return { name, content: encoding === 'base64' ? new Uint8Array(Buffer.from(content, 'base64')) : content };
   }
 }
 
@@ -259,12 +317,59 @@ export interface ExportJobSpec<
   readonly store?: ExportStore;
   readonly storeToken?: Token<ExportStore>;
   readonly batchSize?: number;
+  /** Enables the `pdf` format, which is refused without one. */
+  readonly pdf?: PdfRenderer;
+}
+
+/** What a PDF renderer gets: rows arrive as the export reads them, so it can stream. */
+export interface PdfRenderInput {
+  readonly title: string;
+  readonly columns: readonly string[];
+  readonly rows: AsyncIterable<JsonObject>;
+}
+
+/** Turns an export's rows into a PDF. The framework ships none, so any library can sit behind this. */
+export interface PdfRenderer {
+  render(input: PdfRenderInput): AsyncIterable<Uint8Array> | Promise<Uint8Array>;
+}
+
+const encoder = new TextEncoder();
+
+async function* textChunks(format: 'csv' | 'json', columns: readonly string[], rows: AsyncIterable<JsonObject>) {
+  let first = true;
+  if (format === 'csv') yield encoder.encode(`${toCsvLine(columns)}\r\n`);
+  else yield encoder.encode('[\n');
+  for await (const row of rows) {
+    if (format === 'csv') yield encoder.encode(`${toCsvLine(columns.map((c) => String(row[c] ?? '')))}\r\n`);
+    else yield encoder.encode(`${first ? '' : ',\n'}${JSON.stringify(row)}`);
+    first = false;
+  }
+  if (format === 'json') yield encoder.encode('\n]\n');
+}
+
+async function* pdfChunks(renderer: PdfRenderer, input: PdfRenderInput): AsyncGenerator<Uint8Array> {
+  const rendered = renderer.render(input);
+  if (rendered instanceof Promise) yield await rendered;
+  else yield* rendered;
+}
+
+/** Streams to a store that can; otherwise holds the artifact, keeping text formats as text. */
+async function writeArtifact(store: ExportStore, jobId: string, name: string, chunks: AsyncIterable<Uint8Array>) {
+  if (store.writeStream) {
+    await store.writeStream(jobId, name, chunks);
+    return;
+  }
+  const parts: Uint8Array[] = [];
+  for await (const chunk of chunks) parts.push(chunk);
+  const bytes = new Uint8Array(Buffer.concat(parts));
+  await store.write(jobId, name, BINARY_ARTIFACT.test(name) ? bytes : new TextDecoder().decode(bytes));
 }
 
 /**
- * Queued export: streams the repository's keyset batches into a CSV or JSON
- * artifact held by the export store. Memory stays bounded by the batch size;
- * the artifact itself is assembled in memory before it is written.
+ * Queued export: streams the repository's keyset batches into a CSV, JSON, XLSX
+ * or PDF artifact. Memory stays bounded by the batch size when the store has
+ * `writeStream` (`LocalExportStore` does); otherwise the artifact is assembled
+ * in memory before it is written.
  */
 export function defineExportJob<
   TEntity extends ResourceEntity,
@@ -274,40 +379,42 @@ export function defineExportJob<
   return defineJob({
     name: `${spec.resource}.export`,
     version: 1,
-    payload: z.object({ resource: z.literal(spec.resource), format: z.enum(['csv', 'json']) }).strict(),
+    payload: z
+      .object({
+        resource: z.literal(spec.resource),
+        format: z.enum(spec.pdf ? [...EXPORT_FORMATS, 'pdf'] : EXPORT_FORMATS),
+      })
+      .strict(),
     async handle(payload, context: JobContext): Promise<ExportOutcome> {
       const repository = context.scope.resolve(spec.repository);
-      if (!repository.batches)
-        throw new FrameworkError('EXPORT_UNSUPPORTED', 'Repository does not support batched reads');
+      const batches = repository.batches?.bind(repository);
+      if (!batches) throw new FrameworkError('EXPORT_UNSUPPORTED', 'Repository does not support batched reads');
       const store = spec.store ?? (spec.storeToken ? context.scope.resolve(spec.storeToken) : undefined);
       if (!store) throw new FrameworkError('EXPORT_STORE_MISSING', 'Export job needs `store` or `storeToken`');
       const size = spec.batchSize ?? DEFAULT_EXPORT_BATCH;
-      const chunks: string[] = [];
-      let rows = 0;
-      if (payload.format === 'csv') chunks.push(`${toCsvLine(spec.columns)}\r\n`);
-      else chunks.push('[\n');
-
-      for await (const batch of repository.batches(size)) {
-        const serialized = batch.map(spec.serialize) as ExportRow[];
-        if (payload.format === 'csv') {
-          for (const row of serialized) {
-            chunks.push(`${toCsvLine(spec.columns.map((c) => String(row[c] ?? '')))}\r\n`);
-            rows += 1;
+      let count = 0;
+      const rows = async function* (): AsyncGenerator<JsonObject> {
+        for await (const batch of batches(size)) {
+          for (const entity of batch) {
+            yield spec.serialize(entity) as ExportRow;
+            count += 1;
           }
-        } else {
-          for (const row of serialized) {
-            chunks.push(rows === 0 ? '' : ',\n', JSON.stringify(row));
-            rows += 1;
-          }
+          await report(spec.resource, 'export.progress', { rows: count }, context);
         }
-        await report(spec.resource, 'export.progress', { rows }, context);
-      }
-      if (payload.format === 'json') chunks.push('\n]\n');
+      };
+      const chunksFor = (format: ExportFormat): AsyncIterable<Uint8Array> => {
+        if (format === 'xlsx') return xlsxChunks(spec.resource, spec.columns, rows());
+        if (format === 'pdf') {
+          if (!spec.pdf) throw new FrameworkError('EXPORT_FORMAT_UNSUPPORTED', 'This export has no PDF renderer');
+          return pdfChunks(spec.pdf, { title: spec.resource, columns: spec.columns, rows: rows() });
+        }
+        return textChunks(format, spec.columns, rows());
+      };
 
       const artifact = `${spec.resource}-${new Date().toISOString().slice(0, 10)}.${payload.format}`;
-      await store.write(context.jobId, artifact, chunks.join(''));
-      await report(spec.resource, 'export.completed', { rows, artifact }, context);
-      return { rows, artifact };
+      await writeArtifact(store, context.jobId, artifact, chunksFor(payload.format));
+      await report(spec.resource, 'export.completed', { rows: count, artifact }, context);
+      return { rows: count, artifact };
     },
   });
 }
@@ -356,7 +463,7 @@ export class DataPorter {
 
   async runImport(
     resource: string,
-    format: DataFormat,
+    format: ImportFormat,
     content: string,
     execution: ExecutionContext,
   ): Promise<{ readonly jobId: string }> {
@@ -368,7 +475,7 @@ export class DataPorter {
 
   async runExport(
     resource: string,
-    format: DataFormat,
+    format: ExportFormat,
     execution: ExecutionContext,
   ): Promise<{ readonly jobId: string }> {
     const definition = this.#exports.get(resource);
@@ -392,7 +499,8 @@ export class DataPorter {
 export const importRequestSchema = z
   .object({
     resource: z.string().regex(RESOURCE_NAME),
-    format: z.enum(['csv', 'json']),
+    format: z.enum(IMPORT_FORMATS),
+    /** Text for `csv` and `json`, base64 for `xlsx`. */
     content: z.string().min(1),
   })
   .strict();
@@ -401,7 +509,7 @@ export const importRequestSchema = z
 export const exportRequestSchema = z
   .object({
     resource: z.string().regex(RESOURCE_NAME),
-    format: z.enum(['csv', 'json']),
+    format: z.enum([...EXPORT_FORMATS, 'pdf']),
   })
   .strict();
 
@@ -424,9 +532,9 @@ export interface DataRoutesOptions {
  * Import/export endpoints (mounted per API, e.g. under `/api/v1/data`):
  *
  * ```text
- * POST /import                 dispatch a queued import (CSV/JSON content)
+ * POST /import                 dispatch a queued import (CSV, JSON or base64 XLSX content)
  * GET  /import/status/:jobId   job state, progress and row errors
- * POST /export                 dispatch a queued export
+ * POST /export                 dispatch a queued export (CSV, JSON, XLSX, or PDF with a renderer)
  * GET  /export/status/:jobId   job state
  * GET  /export/download/:jobId the finished artifact
  * ```
@@ -461,6 +569,11 @@ export function importExportRoutes(options: DataRoutesOptions): Hono<FrameworkEn
         .porter(c)
         .runExport(body.resource, body.format, options.execution(c))
         .catch((error: Error) => {
+          if (error instanceof FrameworkError && error.code === 'JOB_PAYLOAD_INVALID') {
+            throw validationFailed([
+              { path: 'format', message: 'This export does not offer that format', code: 'invalid' },
+            ]);
+          }
           throw error instanceof FrameworkError && error.code === 'JOB_DISPATCH_FAILED'
             ? serviceUnavailable(error.message)
             : error;
@@ -474,9 +587,9 @@ export function importExportRoutes(options: DataRoutesOptions): Hono<FrameworkEn
     })
     .get('/export/download/:jobId', guard, validate('param', jobIdParamSchema), async (c) => {
       const stored = await options.porter(c).download(c.req.valid('param').jobId);
-      if (!stored.name.endsWith('.csv') && !stored.name.endsWith('.json')) throw badRequest('Unsupported artifact');
-      const type = stored.name.endsWith('.csv') ? 'text/csv' : 'application/json';
-      return c.body(stored.content, 200, {
+      const type = ARTIFACT_TYPES[stored.name.slice(stored.name.lastIndexOf('.') + 1)];
+      if (!type) throw badRequest('Unsupported artifact');
+      return c.body(stored.content as string, 200, {
         'content-type': type,
         'content-disposition': `attachment; filename="${stored.name}"`,
       });

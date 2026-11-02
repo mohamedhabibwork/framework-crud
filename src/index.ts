@@ -14,6 +14,7 @@ export {
 } from './constants';
 export { ResourceController } from './controller';
 export { csvField, csvToObjects, parseCsv, toCsv, toCsvLine } from './csv';
+export { parseXlsx, xlsxChunks } from './xlsx';
 export {
   DataPorter,
   DiskExportStore,
@@ -46,7 +47,9 @@ export type {
   ExportOutcome,
   ExportPayload,
   ExportRow,
+  ExportFormat,
   ExportStore,
+  ImportFormat,
   ImportJobSpec,
   ImportOutcome,
   ImportPayload,
@@ -57,6 +60,8 @@ export type {
   PageMeta,
   PageRequest,
   PageResponse,
+  PdfRenderer,
+  PdfRenderInput,
   PorterQueue,
   QueryOptions,
   ResourceEntity,

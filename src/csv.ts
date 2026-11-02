@@ -6,7 +6,7 @@ export interface CsvTable {
   readonly rows: readonly string[][];
 }
 
-const MAX_FIELDS = 100_000;
+export const MAX_CSV_FIELDS = 100_000;
 
 /**
  * RFC 4180 CSV: fields may be quoted, quotes are doubled, quoted fields may
@@ -26,7 +26,8 @@ export function parseCsv(text: string): CsvTable {
     row.push(field);
     field = '';
     fields += 1;
-    if (fields > MAX_FIELDS) throw new FrameworkError('CSV_TOO_LARGE', `CSV input exceeds ${MAX_FIELDS} fields`);
+    if (fields > MAX_CSV_FIELDS)
+      throw new FrameworkError('CSV_TOO_LARGE', `CSV input exceeds ${MAX_CSV_FIELDS} fields`);
   };
   const pushRow = () => {
     pushField();

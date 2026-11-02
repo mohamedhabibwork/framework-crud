@@ -315,13 +315,13 @@ describe('import/export jobs', () => {
     expect(csvOutcome.rows).toBeGreaterThanOrEqual(1);
     const csv = await store.fetch('export-1');
     expect(csv?.name.endsWith('.csv')).toBe(true);
-    const table = parseCsv(csv?.content ?? '');
+    const table = parseCsv((csv?.content as string | undefined) ?? '');
     expect(table.columns).toEqual(['id', 'name', 'price']);
     expect(table.rows.length).toBe(csvOutcome.rows);
 
     const jsonOutcome = await exportJob.handle({ resource: 'items', format: 'json' }, jobContext('export-2'));
     const json = await store.fetch('export-2');
-    expect(JSON.parse(json?.content ?? '[]')).toHaveLength(jsonOutcome.rows);
+    expect(JSON.parse((json?.content as string | undefined) ?? '[]')).toHaveLength(jsonOutcome.rows);
   });
 });
 
