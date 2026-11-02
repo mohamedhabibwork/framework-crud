@@ -13,10 +13,11 @@ import {
 import { EVENT_BUS } from '@framework/events';
 import {
   type AppModule,
-  authenticatedPolicy,
   authorize,
+  currentPrincipal,
   denyAll,
   type FrameworkEnv,
+  hasAbility,
   type ResourcePolicy,
   requireAuth,
   resolve,
@@ -115,7 +116,10 @@ export interface DefineResourceOptions<
   TUpdate extends z.ZodType,
   TResponse extends z.ZodType,
 > {
-  /** `public`, `authenticated` (401 for anonymous callers), or your own policy. */
+  /**
+   * `public`, your own policy, or `authenticated`: 401 for anonymous callers, and
+   * callers need `<abilityPrefix>.<ability>` (sessions hold `*`; tokens are scoped).
+   */
   readonly access: 'public' | 'authenticated' | ResourcePolicy;
   /** The singular resource name in OpenAPI. Defaults to the table's name, singular and in PascalCase. */
   readonly name?: string;
@@ -123,6 +127,10 @@ export interface DefineResourceOptions<
   readonly path?: string;
   /** Prefix the documented paths assume. Defaults to `/api/v1`, like `defineApp`. */
   readonly apiPrefix?: string;
+  /** Defaults to the table's name in camelCase, e.g. `blogPosts.view`. */
+  readonly abilityPrefix?: string;
+  /** Lifecycle routes for soft-deleted rows. Defaults to whether the table has `deletedAt`. */
+  readonly softDelete?: boolean;
   /** Scopes every operation to the acting user, who is stamped as owner on create. */
   readonly ownedBy?: TOwner & keyof Row<TTable>;
   /**
@@ -136,6 +144,7 @@ export interface DefineResourceOptions<
     readonly create?: TCreate;
     readonly update?: TUpdate;
     readonly response?: TResponse;
+    readonly param?: z.ZodObject<{ id: z.ZodType }>;
   };
   /** Replaces the default projection of `schemas.response`'s keys. */
   readonly toResponse?: (row: Row<TTable>) => z.output<TResponse>;
@@ -184,6 +193,27 @@ const publicPolicy: ResourcePolicy = {
   restore: allow,
 };
 
+const camelCase = (table: string): string => table.replace(/[_-]+(\w)/g, (_, letter: string) => letter.toUpperCase());
+
+/** Abilities a resource routes require `<prefix>.<ability>`; everything else stays denied. */
+const abilityPolicy = (prefix: string): ResourcePolicy => {
+  const granted =
+    (ability: string) =>
+    (c: Context<FrameworkEnv>): boolean => {
+      const principal = currentPrincipal(c);
+      return principal !== null && hasAbility(principal, `${prefix}.${ability}`);
+    };
+  return {
+    ...denyAll,
+    viewAny: granted('viewAny'),
+    view: granted('view'),
+    create: granted('create'),
+    update: granted('update'),
+    delete: granted('delete'),
+    restore: granted('restore'),
+  };
+};
+
 const pascalSingular = (table: string): string => {
   const words = table.split(/[_-]/).map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`);
   const last = (words.at(-1) as string)
@@ -219,13 +249,14 @@ export function defineResource<
   const tableName = getTableName(table);
   const resource = options.name ?? pascalSingular(tableName);
   const path = options.path ?? `/${tableName.replaceAll('_', '-')}`;
-  const softDelete = 'deletedAt' in table;
+  const softDelete = options.softDelete ?? 'deletedAt' in table;
   const { access, schemas: given = {} } = options;
 
   const derived = resolveResourceSchemas(table, {
     readOnly: [...(options.hidden ?? []), ...(options.ownedBy ? [options.ownedBy] : [])],
     ...(given.create ? { createSchema: given.create } : {}),
     ...(given.update ? { updateSchema: given.update } : {}),
+    ...(given.param ? { paramSchema: given.param } : {}),
     ...(given.query ? { querySchema: given.query as unknown as z.ZodObject<z.ZodRawShape> } : {}),
   });
   const hidden = ['deletedAt', ...(options.hidden ?? [])];
@@ -247,7 +278,11 @@ export function defineResource<
     });
 
   const policy: ResourcePolicy =
-    access === 'public' ? publicPolicy : access === 'authenticated' ? authenticatedPolicy : access;
+    access === 'public'
+      ? publicPolicy
+      : access === 'authenticated'
+        ? abilityPolicy(options.abilityPrefix ?? camelCase(tableName))
+        : access;
   const tokens = {
     repository: token<CrudRepository<Row<TTable>, JsonObject, Partial<JsonObject>>>(
       `${tableName}.${resource}.repository`,
@@ -303,9 +338,10 @@ export function defineResource<
     validate(target, schema) as unknown as MiddlewareHandler<FrameworkEnv>;
   const param = check('param', derived.paramSchema);
   const query = check('query', derived.querySchema);
-  const pathId = (c: Context<FrameworkEnv>) => c.req.param('id') as string;
-  const valid = <T>(c: Context<FrameworkEnv>, target: 'json' | 'query'): T =>
+  const valid = <T>(c: Context<FrameworkEnv>, target: 'json' | 'query' | 'param'): T =>
     (c.req as unknown as { valid(target: string): T }).valid(target);
+  // The param schema coerces: integer keys must not reach the service as strings.
+  const pathId = (c: Context<FrameworkEnv>) => valid<{ id: string }>(c, 'param').id;
 
   const app = new Hono<FrameworkEnv>();
   // Per-route order, as in generated modules: validation -> authentication -> authorization -> handler.

@@ -12,7 +12,7 @@ import { EVENT_BUS, MemoryEventBus } from '@framework/events';
 import { defineApp, denyAll, listRoutes } from '@framework/http';
 import { checkOperations, generateOpenApiDocument, type Operation } from '@framework/openapi';
 import { createTestDatabase, requireTestDatabaseUrl, type TestDatabase } from '@framework/testing';
-import { pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { hc } from 'hono/client';
 import { z } from 'zod/v4';
 import { defineResource, ResourceService } from '../src';
@@ -34,6 +34,13 @@ const drafts = pgTable('define_resource_drafts', {
   deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'string' }),
 });
 
+const counters = pgTable('define_resource_counters', {
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  label: text('label').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+});
+
 let database: TestDatabase;
 let connection: DatabaseConnection;
 
@@ -52,7 +59,10 @@ const dataProvider = defineProvider<object>({
 const notesResource = defineResource(notes, { access: 'public', hidden: ['secret'] });
 
 /** Boots an app around one module, acting as whoever the `x-actor` header names. */
-async function serve(module: Parameters<typeof defineApp<object, Operation>>[0]['modules']) {
+async function serve(
+  module: Parameters<typeof defineApp<object, Operation>>[0]['modules'],
+  abilities?: readonly string[],
+) {
   const app = defineApp<object, Operation>({
     http: () => ({
       exposeInternalErrors: false,
@@ -61,6 +71,16 @@ async function serve(module: Parameters<typeof defineApp<object, Operation>>[0][
         return id ? { id, type: 'user' } : ANONYMOUS_ACTOR;
       },
     }),
+    ...(abilities
+      ? {
+          middleware: () => [
+            async (c, next) => {
+              c.set('principal', { id: 'tester', abilities });
+              await next();
+            },
+          ],
+        }
+      : {}),
     providers: [dataProvider],
     modules: module ?? [],
   });
@@ -82,6 +102,12 @@ beforeAll(async () => {
     title text not null,
     secret text not null default 'hidden',
     owner_id text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+  )`;
+  await connection.sql`create table define_resource_counters (
+    id integer primary key generated always as identity,
+    label text not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
   )`;
@@ -185,6 +211,49 @@ describe('defineResource', () => {
     expect((await http.request('/api/v1/guarded')).status).toBe(401);
     expect((await http.request('/api/v1/denied')).status).toBe(403);
 
+    await application.shutdown();
+  });
+
+  test("access: 'authenticated' honours token abilities, per resource", async () => {
+    const guarded = defineResource(notes, { access: 'authenticated', name: 'ScopedNote', path: '/scoped' });
+
+    const limited = await serve([guarded], ['orders.view']);
+    expect((await limited.http.request('/api/v1/scoped')).status).toBe(403);
+    await limited.application.shutdown();
+
+    const scoped = await serve([guarded], ['defineResourceNotes.viewAny']);
+    expect((await scoped.http.request('/api/v1/scoped')).status).toBe(200);
+    expect((await scoped.http.request('/api/v1/scoped', json('POST', { title: 'x' }))).status).toBe(403);
+    await scoped.application.shutdown();
+
+    const session = await serve([guarded], ['*']);
+    expect((await session.http.request('/api/v1/scoped')).status).toBe(200);
+    await session.application.shutdown();
+  });
+
+  test('integer primary keys are coerced from the path', async () => {
+    const { application, http } = await serve([defineResource(counters, { access: 'public' })]);
+    const base = '/api/v1/define-resource-counters';
+
+    const { id } = (await (await http.request(base, json('POST', { label: 'c' }))).json()) as { id: number };
+    expect(id).toBeNumber();
+    expect((await http.request(`${base}/${id}`)).status).toBe(200);
+    expect((await http.request(`${base}/${id}`, json('PATCH', { label: 'd' }))).status).toBe(200);
+    expect((await http.request(`${base}/not-a-number`)).status).toBe(422);
+    expect((await http.request(`${base}/${id}`, { method: 'DELETE' })).status).toBe(204);
+
+    await application.shutdown();
+  });
+
+  test('softDelete: false leaves the lifecycle routes out', async () => {
+    const resource = defineResource(drafts, {
+      access: 'public',
+      name: 'PlainDraft',
+      path: '/plain',
+      softDelete: false,
+    });
+    const { application, http } = await serve([resource]);
+    expect(listRoutes(http).map((route) => route.path)).not.toContain('/api/v1/plain/deleted');
     await application.shutdown();
   });
 
