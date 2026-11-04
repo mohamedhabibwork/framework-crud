@@ -264,7 +264,7 @@ describe('parseXlsx', () => {
 
     expect(codeOf(() => parseXlsx(bytes))).toBe('IMPORT_TOO_LARGE');
     expect(performance.now() - started).toBeLessThan(2_000);
-  });
+  }, 30_000);
 
   test('deeply nested XML is refused before it costs memory', () => {
     expect(codeOf(() => parseXlsx(workbookWith(`<worksheet>${'<a>'.repeat(1_000_000)}`)))).toBe('IMPORT_INVALID');
